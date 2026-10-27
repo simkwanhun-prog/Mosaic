@@ -74,8 +74,8 @@ jobs:
                   applicationId "com.example.mosaicoverlay"
                   minSdk 29
                   targetSdk 33
-                  versionCode 1
-                  versionName "1.0"
+                  versionCode 2
+                  versionName "2.0"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -149,9 +149,9 @@ jobs:
                       setBackgroundColor(Color.parseColor("#F5F5F5"))
                   }
                   val infoText = TextView(this).apply {
-                      text = "갤럭시 노트 10 전체화면 모자이크\n(동영상 최적화 버전)\n\n" +
-                             "• 시작 후 상단 컨트롤러에서 [모자이크 강도]와 [프레임(FPS)]을 실시간으로 조절할 수 있습니다.\n" +
-                             "• 컨트롤러의 빈 공간을 드래그하면 위치를 옮길 수 있습니다."
+                      text = "갤럭시 노트 10 전체화면 모자이크 v2.0\n(검은 화면 완벽 해결 버전)\n\n" +
+                             "• 시작 후 상단 컨트롤러에서 [모자이크 강도]와 [속도(FPS)]를 조절할 수 있습니다.\n" +
+                             "• 제어판 상단 글씨를 드래그하면 위치를 이동할 수 있습니다."
                       textSize = 15f
                       setTextColor(Color.BLACK)
                       setPadding(0, 0, 0, 60)
@@ -247,13 +247,32 @@ jobs:
               private var screenDensity = 400
 
               @Volatile private var mosaicBlockSize = 20
-              @Volatile private var targetFps = 24
-              @Volatile private var lastFrameTimeMs = 0L
+              @Volatile private var targetFps = 15
+              @Volatile private var isEnabled = true
+              @Volatile private var isSampling = false
 
               private var currentBitmap: Bitmap? = null
               private val mainHandler = Handler(Looper.getMainLooper())
               private var bgThread: HandlerThread? = null
               private var bgHandler: Handler? = null
+
+              // 찰나의 순간에 원본 화면만 깨끗하게 가져오는 스텔스 캡처 루프
+              private val frameLoopRunnable = object : Runnable {
+                  override fun run() {
+                      if (!isEnabled || mosaicView == null) return
+
+                      // 1. 모자이크 창을 0.02초 동안 투명하게 비켜줌 (원본 동영상 노출)
+                      mosaicView?.alpha = 0f
+                      isSampling = true
+
+                      // 2. 22ms 뒤 SurfaceFlinger가 원본 화면을 버퍼에 담으면 즉시 캡처 후 모자이크 복구
+                      mainHandler.postDelayed({
+                          bgHandler?.post {
+                              captureCleanFrame()
+                          }
+                      }, 22L)
+                  }
+              }
 
               override fun onBind(intent: Intent?): IBinder? = null
 
@@ -283,6 +302,7 @@ jobs:
                   if (resultCode == Activity.RESULT_OK && data != null) {
                       setupOverlayViews()
                       startScreenCapture(resultCode, data)
+                      mainHandler.postDelayed(frameLoopRunnable, 100L)
                   } else {
                       stopSelf()
                   }
@@ -303,7 +323,7 @@ jobs:
                   val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                       Notification.Builder(this, channelId)
                           .setContentTitle("전체화면 모자이크 작동 중")
-                          .setContentText("동영상 렉 발생 시 상단 바에서 FPS를 낮춰주세요.")
+                          .setContentText("상단 제어판에서 강도와 속도를 조절하세요.")
                           .setSmallIcon(android.R.drawable.ic_menu_view)
                           .build()
                   } else {
@@ -326,6 +346,7 @@ jobs:
                       WindowManager.LayoutParams.TYPE_PHONE
                   }
 
+                  // 핵심: 갤럭시 One UI에서 검은 화면을 유발하던 FLAG_SECURE 완전 제거!
                   val mosaicParams = WindowManager.LayoutParams(
                       WindowManager.LayoutParams.MATCH_PARENT,
                       WindowManager.LayoutParams.MATCH_PARENT,
@@ -333,8 +354,7 @@ jobs:
                       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                               WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                               WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                              WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-                              WindowManager.LayoutParams.FLAG_SECURE,
+                              WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                       PixelFormat.TRANSLUCENT
                   )
                   windowManager.addView(mosaicView, mosaicParams)
@@ -361,12 +381,16 @@ jobs:
                       text = "모자이크 ON"
                       textSize = 11f
                       setOnClickListener {
-                          if (mosaicView?.visibility == View.VISIBLE) {
-                              mosaicView?.visibility = View.INVISIBLE
-                              text = "모자이크 OFF"
-                          } else {
+                          isEnabled = !isEnabled
+                          if (isEnabled) {
                               mosaicView?.visibility = View.VISIBLE
                               text = "모자이크 ON"
+                              mainHandler.removeCallbacks(frameLoopRunnable)
+                              mainHandler.post(frameLoopRunnable)
+                          } else {
+                              mainHandler.removeCallbacks(frameLoopRunnable)
+                              mosaicView?.visibility = View.INVISIBLE
+                              text = "모자이크 OFF"
                           }
                       }
                   }
@@ -428,18 +452,18 @@ jobs:
                       setPadding(0, 8, 0, 0)
                   }
                   val fpsLabel = TextView(this).apply {
-                      text = "속도(24fps): "
+                      text = "속도(15fps): "
                       setTextColor(Color.WHITE)
                       textSize = 11f
                       width = 180
                   }
                   val fpsSeek = SeekBar(this).apply {
-                      max = 55
-                      progress = 19
+                      max = 27 // 3 ~ 30 FPS
+                      progress = 12 // 기본 15 FPS
                       layoutParams = LinearLayout.LayoutParams(360, ViewGroup.LayoutParams.WRAP_CONTENT)
                       setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                           override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                              targetFps = p + 5
+                              targetFps = p + 3
                               fpsLabel.text = "속도(${targetFps}fps): "
                           }
                           override fun onStartTrackingTouch(s: SeekBar?) {}
@@ -458,7 +482,7 @@ jobs:
                       WindowManager.LayoutParams.WRAP_CONTENT,
                       WindowManager.LayoutParams.WRAP_CONTENT,
                       overlayType,
-                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_SECURE,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                       PixelFormat.TRANSLUCENT
                   ).apply {
                       gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
@@ -507,48 +531,7 @@ jobs:
                   val smallH = (screenHeight / factor).coerceAtLeast(16)
 
                   val oldReader = imageReader
-                  val newReader = ImageReader.newInstance(smallW, smallH, PixelFormat.RGBA_8888, 2)
-
-                  newReader.setOnImageAvailableListener({ reader ->
-                      val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
-                      try {
-                          val now = SystemClock.elapsedRealtime()
-                          val minInterval = 1000L / targetFps.coerceIn(5, 60)
-                          if (now - lastFrameTimeMs < minInterval || mosaicView?.visibility != View.VISIBLE) {
-                              return@setOnImageAvailableListener
-                          }
-                          lastFrameTimeMs = now
-
-                          val plane = image.planes[0]
-                          val buffer = plane.buffer
-                          val pixelStride = plane.pixelStride
-                          val rowStride = plane.rowStride
-                          val rowPadding = rowStride - pixelStride * smallW
-
-                          val wWithPad = smallW + rowPadding / pixelStride
-                          val rawBitmap = Bitmap.createBitmap(wWithPad, smallH, Bitmap.Config.ARGB_8888)
-                          rawBitmap.copyPixelsFromBuffer(buffer)
-
-                          val finalBitmap = if (rowPadding == 0) {
-                              rawBitmap
-                          } else {
-                              val cropped = Bitmap.createBitmap(rawBitmap, 0, 0, smallW, smallH)
-                              rawBitmap.recycle()
-                              cropped
-                          }
-
-                          mainHandler.post {
-                              val old = currentBitmap
-                              currentBitmap = finalBitmap
-                              mosaicView?.invalidate()
-                              old?.recycle()
-                          }
-                      } catch (e: Exception) {
-                          e.printStackTrace()
-                      } finally {
-                          image.close()
-                      }
-                  }, bgHandler)
+                  val newReader = ImageReader.newInstance(smallW, smallH, PixelFormat.RGBA_8888, 3)
 
                   imageReader = newReader
 
@@ -570,8 +553,65 @@ jobs:
                   oldReader?.close()
               }
 
+              private fun captureCleanFrame() {
+                  val reader = imageReader ?: return
+                  val image = try {
+                      reader.acquireLatestImage()
+                  } catch (e: Exception) {
+                      null
+                  }
+
+                  var newBitmap: Bitmap? = null
+                  if (image != null) {
+                      try {
+                          val smallW = image.width
+                          val smallH = image.height
+                          val plane = image.planes[0]
+                          val buffer = plane.buffer
+                          val pixelStride = plane.pixelStride
+                          val rowStride = plane.rowStride
+                          val rowPadding = rowStride - pixelStride * smallW
+
+                          val wWithPad = smallW + rowPadding / pixelStride
+                          val rawBitmap = Bitmap.createBitmap(wWithPad, smallH, Bitmap.Config.ARGB_8888)
+                          rawBitmap.copyPixelsFromBuffer(buffer)
+
+                          newBitmap = if (rowPadding == 0) {
+                              rawBitmap
+                          } else {
+                              val cropped = Bitmap.createBitmap(rawBitmap, 0, 0, smallW, smallH)
+                              rawBitmap.recycle()
+                              cropped
+                          }
+                      } catch (e: Exception) {
+                          e.printStackTrace()
+                      } finally {
+                          image.close()
+                      }
+                  }
+
+                  mainHandler.post {
+                      if (newBitmap != null) {
+                          val old = currentBitmap
+                          currentBitmap = newBitmap
+                          mosaicView?.invalidate()
+                          old?.recycle()
+                      }
+                      // 3. 캡처가 끝나는 즉시 모자이크 화면을 다시 불투명하게 표시
+                      mosaicView?.alpha = 1f
+                      isSampling = false
+
+                      if (isEnabled) {
+                          val delay = (1000L / targetFps.coerceIn(3, 30)).coerceAtLeast(25L)
+                          mainHandler.postDelayed(frameLoopRunnable, delay)
+                      }
+                  }
+              }
+
               override fun onDestroy() {
                   super.onDestroy()
+                  isEnabled = false
+                  mainHandler.removeCallbacksAndMessages(null)
                   virtualDisplay?.release()
                   imageReader?.close()
                   mediaProjection?.stop()
@@ -607,5 +647,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: GalaxyNote10-FullScreen-Mosaic-APK
+          name: GalaxyNote10-FullScreen-Mosaic-APK-v2
           path: app/build/outputs/apk/debug/app-debug.apk
