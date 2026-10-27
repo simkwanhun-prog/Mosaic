@@ -5,6 +5,9 @@ on:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -23,7 +26,7 @@ jobs:
         with:
           gradle-version: '8.4'
 
-      - name: Generate Project & Source Code
+      - name: Generate Project and Build APK
         run: |
           mkdir -p app/src/main/java/com/example/mosaicoverlay
 
@@ -64,11 +67,9 @@ jobs:
               id 'com.android.application'
               id 'org.jetbrains.kotlin.android'
           }
-
           android {
               namespace 'com.example.mosaicoverlay'
               compileSdk 34
-
               defaultConfig {
                   applicationId "com.example.mosaicoverlay"
                   minSdk 29
@@ -76,7 +77,6 @@ jobs:
                   versionCode 1
                   versionName "1.0"
               }
-
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
                   targetCompatibility JavaVersion.VERSION_17
@@ -90,17 +90,14 @@ jobs:
           cat << 'EOF' > app/src/main/AndroidManifest.xml
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
               <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
-
               <application
                   android:allowBackup="true"
                   android:label="전체화면 모자이크"
                   android:supportsRtl="true"
                   android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
-
                   <activity
                       android:name=".MainActivity"
                       android:exported="true">
@@ -109,7 +106,6 @@ jobs:
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
-
                   <service
                       android:name=".MosaicService"
                       android:enabled="true"
@@ -138,14 +134,12 @@ jobs:
           import android.widget.Toast
 
           class MainActivity : Activity() {
-
               private lateinit var projectionManager: MediaProjectionManager
               private val REQ_OVERLAY = 1001
               private val REQ_CAPTURE = 1002
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-
                   projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
                   val layout = LinearLayout(this).apply {
@@ -154,7 +148,6 @@ jobs:
                       setPadding(60, 60, 60, 60)
                       setBackgroundColor(Color.parseColor("#F5F5F5"))
                   }
-
                   val infoText = TextView(this).apply {
                       text = "갤럭시 노트 10 전체화면 모자이크\n(동영상 최적화 버전)\n\n" +
                              "• 시작 후 상단 컨트롤러에서 [모자이크 강도]와 [프레임(FPS)]을 실시간으로 조절할 수 있습니다.\n" +
@@ -163,13 +156,11 @@ jobs:
                       setTextColor(Color.BLACK)
                       setPadding(0, 0, 0, 60)
                   }
-
                   val startBtn = Button(this).apply {
                       text = "전체화면 모자이크 시작"
                       textSize = 17f
                       setOnClickListener { checkPermissionsAndStart() }
                   }
-
                   val stopBtn = Button(this).apply {
                       text = "모자이크 완전히 종료"
                       textSize = 17f
@@ -177,7 +168,6 @@ jobs:
                           stopService(Intent(this@MainActivity, MosaicService::class.java))
                       }
                   }
-
                   layout.addView(infoText)
                   layout.addView(startBtn)
                   layout.addView(stopBtn)
@@ -245,12 +235,10 @@ jobs:
           import android.widget.*
 
           class MosaicService : Service() {
-
               private lateinit var windowManager: WindowManager
               private var mediaProjection: MediaProjection? = null
               private var virtualDisplay: VirtualDisplay? = null
               private var imageReader: ImageReader? = null
-
               private var mosaicView: MosaicOverlayView? = null
               private var controlView: View? = null
 
@@ -258,14 +246,9 @@ jobs:
               private var screenHeight = 2280
               private var screenDensity = 400
 
-              @Volatile
-              private var mosaicBlockSize = 20
-
-              @Volatile
-              private var targetFps = 24
-
-              @Volatile
-              private var lastFrameTimeMs = 0L
+              @Volatile private var mosaicBlockSize = 20
+              @Volatile private var targetFps = 24
+              @Volatile private var lastFrameTimeMs = 0L
 
               private var currentBitmap: Bitmap? = null
               private val mainHandler = Handler(Looper.getMainLooper())
@@ -278,7 +261,6 @@ jobs:
                   super.onCreate()
                   windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
                   updateScreenMetrics()
-
                   bgThread = HandlerThread("MosaicCaptureThread").apply { start() }
                   bgHandler = Handler(bgThread!!.looper)
               }
@@ -294,7 +276,6 @@ jobs:
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
                   startForegroundNotification()
-
                   val resultCode = intent?.getIntExtra("resultCode", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
                   @Suppress("DEPRECATION")
                   val data: Intent? = intent?.getParcelableExtra("data")
@@ -319,7 +300,6 @@ jobs:
                       val manager = getSystemService(NotificationManager::class.java)
                       manager.createNotificationChannel(channel)
                   }
-
                   val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                       Notification.Builder(this, channelId)
                           .setContentTitle("전체화면 모자이크 작동 중")
@@ -333,13 +313,11 @@ jobs:
                           .setSmallIcon(android.R.drawable.ic_menu_view)
                           .build()
                   }
-
                   startForeground(1, notification)
               }
 
               private fun setupOverlayViews() {
                   if (mosaicView != null) return
-
                   mosaicView = MosaicOverlayView(this)
                   val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -366,23 +344,19 @@ jobs:
                       setBackgroundColor(Color.argb(220, 25, 25, 25))
                       setPadding(24, 16, 24, 16)
                   }
-
                   val topRow = LinearLayout(this).apply {
                       orientation = LinearLayout.HORIZONTAL
                       gravity = Gravity.CENTER_VERTICAL
                   }
-
                   val titleText = TextView(this).apply {
                       text = "⠿ 모자이크 제어판  "
                       setTextColor(Color.WHITE)
                       textSize = 12f
                   }
-
                   val slidersContainer = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
                       setPadding(0, 12, 0, 0)
                   }
-
                   val toggleBtn = Button(this).apply {
                       text = "모자이크 ON"
                       textSize = 11f
@@ -396,7 +370,6 @@ jobs:
                           }
                       }
                   }
-
                   val minBtn = Button(this).apply {
                       text = "접기"
                       textSize = 11f
@@ -410,7 +383,6 @@ jobs:
                           }
                       }
                   }
-
                   val closeBtn = Button(this).apply {
                       text = "종료"
                       textSize = 11f
@@ -479,7 +451,6 @@ jobs:
 
                   slidersContainer.addView(strengthRow)
                   slidersContainer.addView(fpsRow)
-
                   rootControl.addView(topRow)
                   rootControl.addView(slidersContainer)
 
@@ -499,7 +470,6 @@ jobs:
                       private var initY = 0
                       private var touchX = 0f
                       private var touchY = 0f
-
                       override fun onTouch(v: View, e: MotionEvent): Boolean {
                           when (e.action) {
                               MotionEvent.ACTION_DOWN -> {
@@ -597,7 +567,6 @@ jobs:
                       virtualDisplay?.resize(smallW, smallH, screenDensity)
                       virtualDisplay?.surface = newReader.surface
                   }
-
                   oldReader?.close()
               }
 
@@ -607,7 +576,6 @@ jobs:
                   imageReader?.close()
                   mediaProjection?.stop()
                   bgThread?.quitSafely()
-
                   mosaicView?.let { windowManager.removeView(it) }
                   controlView?.let { windowManager.removeView(it) }
                   currentBitmap?.recycle()
@@ -632,8 +600,9 @@ jobs:
           }
           EOF
 
-      - name: Build Debug APK
-        run: gradle assembleDebug
+          sed -i 's/^          //' settings.gradle build.gradle gradle.properties app/build.gradle app/src/main/AndroidManifest.xml app/src/main/java/com/example/mosaicoverlay/MainActivity.kt app/src/main/java/com/example/mosaicoverlay/MosaicService.kt
+
+          gradle assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
