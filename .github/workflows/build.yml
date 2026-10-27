@@ -1,0 +1,642 @@
+name: Build FullScreen Mosaic APK
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.4'
+
+      - name: Generate Project & Source Code
+        run: |
+          mkdir -p app/src/main/java/com/example/mosaicoverlay
+
+          cat << 'EOF' > settings.gradle
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "MosaicOverlay"
+          include ':app'
+          EOF
+
+          cat << 'EOF' > build.gradle
+          plugins {
+              id 'com.android.application' version '8.2.0' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.20' apply false
+          }
+          EOF
+
+          cat << 'EOF' > gradle.properties
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+
+          cat << 'EOF' > app/build.gradle
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+
+          android {
+              namespace 'com.example.mosaicoverlay'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.example.mosaicoverlay"
+                  minSdk 29
+                  targetSdk 33
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+              <application
+                  android:allowBackup="true"
+                  android:label="전체화면 모자이크"
+                  android:supportsRtl="true"
+                  android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".MosaicService"
+                      android:enabled="true"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaProjection" />
+              </application>
+          </manifest>
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/example/mosaicoverlay/MainActivity.kt
+          package com.example.mosaicoverlay
+
+          import android.app.Activity
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Color
+          import android.media.projection.MediaProjectionManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+
+              private lateinit var projectionManager: MediaProjectionManager
+              private val REQ_OVERLAY = 1001
+              private val REQ_CAPTURE = 1002
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+
+                  projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+
+                  val layout = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER
+                      setPadding(60, 60, 60, 60)
+                      setBackgroundColor(Color.parseColor("#F5F5F5"))
+                  }
+
+                  val infoText = TextView(this).apply {
+                      text = "갤럭시 노트 10 전체화면 모자이크\n(동영상 최적화 버전)\n\n" +
+                             "• 시작 후 상단 컨트롤러에서 [모자이크 강도]와 [프레임(FPS)]을 실시간으로 조절할 수 있습니다.\n" +
+                             "• 컨트롤러의 빈 공간을 드래그하면 위치를 옮길 수 있습니다."
+                      textSize = 15f
+                      setTextColor(Color.BLACK)
+                      setPadding(0, 0, 0, 60)
+                  }
+
+                  val startBtn = Button(this).apply {
+                      text = "전체화면 모자이크 시작"
+                      textSize = 17f
+                      setOnClickListener { checkPermissionsAndStart() }
+                  }
+
+                  val stopBtn = Button(this).apply {
+                      text = "모자이크 완전히 종료"
+                      textSize = 17f
+                      setOnClickListener {
+                          stopService(Intent(this@MainActivity, MosaicService::class.java))
+                      }
+                  }
+
+                  layout.addView(infoText)
+                  layout.addView(startBtn)
+                  layout.addView(stopBtn)
+                  setContentView(layout)
+              }
+
+              private fun checkPermissionsAndStart() {
+                  if (!Settings.canDrawOverlays(this)) {
+                      Toast.makeText(this, "'다른 앱 위에 표시' 권한을 허용해주세요.", Toast.LENGTH_LONG).show()
+                      val intent = Intent(
+                          Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                          Uri.parse("package:$packageName")
+                      )
+                      startActivityForResult(intent, REQ_OVERLAY)
+                  } else {
+                      requestScreenCapture()
+                  }
+              }
+
+              private fun requestScreenCapture() {
+                  startActivityForResult(projectionManager.createScreenCaptureIntent(), REQ_CAPTURE)
+              }
+
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == REQ_OVERLAY) {
+                      if (Settings.canDrawOverlays(this)) {
+                          requestScreenCapture()
+                      }
+                  } else if (requestCode == REQ_CAPTURE) {
+                      if (resultCode == RESULT_OK && data != null) {
+                          val serviceIntent = Intent(this, MosaicService::class.java).apply {
+                              putExtra("resultCode", resultCode)
+                              putExtra("data", data)
+                          }
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                              startForegroundService(serviceIntent)
+                          } else {
+                              startService(serviceIntent)
+                          }
+                          moveTaskToBack(true)
+                      } else {
+                          Toast.makeText(this, "화면 캡처 권한이 취소되었습니다.", Toast.LENGTH_SHORT).show()
+                      }
+                  }
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/example/mosaicoverlay/MosaicService.kt
+          package com.example.mosaicoverlay
+
+          import android.app.*
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.*
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
+          import android.media.ImageReader
+          import android.media.projection.MediaProjection
+          import android.media.projection.MediaProjectionManager
+          import android.os.*
+          import android.util.DisplayMetrics
+          import android.view.*
+          import android.widget.*
+
+          class MosaicService : Service() {
+
+              private lateinit var windowManager: WindowManager
+              private var mediaProjection: MediaProjection? = null
+              private var virtualDisplay: VirtualDisplay? = null
+              private var imageReader: ImageReader? = null
+
+              private var mosaicView: MosaicOverlayView? = null
+              private var controlView: View? = null
+
+              private var screenWidth = 1080
+              private var screenHeight = 2280
+              private var screenDensity = 400
+
+              @Volatile
+              private var mosaicBlockSize = 20
+
+              @Volatile
+              private var targetFps = 24
+
+              @Volatile
+              private var lastFrameTimeMs = 0L
+
+              private var currentBitmap: Bitmap? = null
+              private val mainHandler = Handler(Looper.getMainLooper())
+              private var bgThread: HandlerThread? = null
+              private var bgHandler: Handler? = null
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                  updateScreenMetrics()
+
+                  bgThread = HandlerThread("MosaicCaptureThread").apply { start() }
+                  bgHandler = Handler(bgThread!!.looper)
+              }
+
+              private fun updateScreenMetrics() {
+                  val metrics = DisplayMetrics()
+                  @Suppress("DEPRECATION")
+                  windowManager.defaultDisplay.getRealMetrics(metrics)
+                  screenWidth = metrics.widthPixels
+                  screenHeight = metrics.heightPixels
+                  screenDensity = metrics.densityDpi
+              }
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  startForegroundNotification()
+
+                  val resultCode = intent?.getIntExtra("resultCode", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
+                  @Suppress("DEPRECATION")
+                  val data: Intent? = intent?.getParcelableExtra("data")
+
+                  if (resultCode == Activity.RESULT_OK && data != null) {
+                      setupOverlayViews()
+                      startScreenCapture(resultCode, data)
+                  } else {
+                      stopSelf()
+                  }
+                  return START_NOT_STICKY
+              }
+
+              private fun startForegroundNotification() {
+                  val channelId = "mosaic_service_channel"
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      val channel = NotificationChannel(
+                          channelId,
+                          "전체화면 모자이크 서비스",
+                          NotificationManager.IMPORTANCE_LOW
+                      )
+                      val manager = getSystemService(NotificationManager::class.java)
+                      manager.createNotificationChannel(channel)
+                  }
+
+                  val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      Notification.Builder(this, channelId)
+                          .setContentTitle("전체화면 모자이크 작동 중")
+                          .setContentText("동영상 렉 발생 시 상단 바에서 FPS를 낮춰주세요.")
+                          .setSmallIcon(android.R.drawable.ic_menu_view)
+                          .build()
+                  } else {
+                      @Suppress("DEPRECATION")
+                      Notification.Builder(this)
+                          .setContentTitle("전체화면 모자이크 작동 중")
+                          .setSmallIcon(android.R.drawable.ic_menu_view)
+                          .build()
+                  }
+
+                  startForeground(1, notification)
+              }
+
+              private fun setupOverlayViews() {
+                  if (mosaicView != null) return
+
+                  mosaicView = MosaicOverlayView(this)
+                  val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+                  } else {
+                      @Suppress("DEPRECATION")
+                      WindowManager.LayoutParams.TYPE_PHONE
+                  }
+
+                  val mosaicParams = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.MATCH_PARENT,
+                      WindowManager.LayoutParams.MATCH_PARENT,
+                      overlayType,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                              WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                              WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                              WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                              WindowManager.LayoutParams.FLAG_SECURE,
+                      PixelFormat.TRANSLUCENT
+                  )
+                  windowManager.addView(mosaicView, mosaicParams)
+
+                  val rootControl = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(Color.argb(220, 25, 25, 25))
+                      setPadding(24, 16, 24, 16)
+                  }
+
+                  val topRow = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                  }
+
+                  val titleText = TextView(this).apply {
+                      text = "⠿ 모자이크 제어판  "
+                      setTextColor(Color.WHITE)
+                      textSize = 12f
+                  }
+
+                  val slidersContainer = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(0, 12, 0, 0)
+                  }
+
+                  val toggleBtn = Button(this).apply {
+                      text = "모자이크 ON"
+                      textSize = 11f
+                      setOnClickListener {
+                          if (mosaicView?.visibility == View.VISIBLE) {
+                              mosaicView?.visibility = View.INVISIBLE
+                              text = "모자이크 OFF"
+                          } else {
+                              mosaicView?.visibility = View.VISIBLE
+                              text = "모자이크 ON"
+                          }
+                      }
+                  }
+
+                  val minBtn = Button(this).apply {
+                      text = "접기"
+                      textSize = 11f
+                      setOnClickListener {
+                          if (slidersContainer.visibility == View.VISIBLE) {
+                              slidersContainer.visibility = View.GONE
+                              text = "펼치기"
+                          } else {
+                              slidersContainer.visibility = View.VISIBLE
+                              text = "접기"
+                          }
+                      }
+                  }
+
+                  val closeBtn = Button(this).apply {
+                      text = "종료"
+                      textSize = 11f
+                      setOnClickListener { stopSelf() }
+                  }
+
+                  topRow.addView(titleText)
+                  topRow.addView(toggleBtn)
+                  topRow.addView(minBtn)
+                  topRow.addView(closeBtn)
+
+                  val strengthRow = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                  }
+                  val strengthLabel = TextView(this).apply {
+                      text = "강도(20): "
+                      setTextColor(Color.WHITE)
+                      textSize = 11f
+                      width = 180
+                  }
+                  val strengthSeek = SeekBar(this).apply {
+                      max = 60
+                      progress = 16
+                      layoutParams = LinearLayout.LayoutParams(360, ViewGroup.LayoutParams.WRAP_CONTENT)
+                      setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                          override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                              mosaicBlockSize = p + 4
+                              strengthLabel.text = "강도($mosaicBlockSize): "
+                          }
+                          override fun onStartTrackingTouch(s: SeekBar?) {}
+                          override fun onStopTrackingTouch(s: SeekBar?) {
+                              bgHandler?.post { rebuildCaptureResolution() }
+                          }
+                      })
+                  }
+                  strengthRow.addView(strengthLabel)
+                  strengthRow.addView(strengthSeek)
+
+                  val fpsRow = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(0, 8, 0, 0)
+                  }
+                  val fpsLabel = TextView(this).apply {
+                      text = "속도(24fps): "
+                      setTextColor(Color.WHITE)
+                      textSize = 11f
+                      width = 180
+                  }
+                  val fpsSeek = SeekBar(this).apply {
+                      max = 55
+                      progress = 19
+                      layoutParams = LinearLayout.LayoutParams(360, ViewGroup.LayoutParams.WRAP_CONTENT)
+                      setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                          override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
+                              targetFps = p + 5
+                              fpsLabel.text = "속도(${targetFps}fps): "
+                          }
+                          override fun onStartTrackingTouch(s: SeekBar?) {}
+                          override fun onStopTrackingTouch(s: SeekBar?) {}
+                      })
+                  }
+                  fpsRow.addView(fpsLabel)
+                  fpsRow.addView(fpsSeek)
+
+                  slidersContainer.addView(strengthRow)
+                  slidersContainer.addView(fpsRow)
+
+                  rootControl.addView(topRow)
+                  rootControl.addView(slidersContainer)
+
+                  val controlParams = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      overlayType,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_SECURE,
+                      PixelFormat.TRANSLUCENT
+                  ).apply {
+                      gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                      y = 90
+                  }
+
+                  rootControl.setOnTouchListener(object : View.OnTouchListener {
+                      private var initX = 0
+                      private var initY = 0
+                      private var touchX = 0f
+                      private var touchY = 0f
+
+                      override fun onTouch(v: View, e: MotionEvent): Boolean {
+                          when (e.action) {
+                              MotionEvent.ACTION_DOWN -> {
+                                  initX = controlParams.x
+                                  initY = controlParams.y
+                                  touchX = e.rawX
+                                  touchY = e.rawY
+                                  return false
+                              }
+                              MotionEvent.ACTION_MOVE -> {
+                                  controlParams.x = initX + (e.rawX - touchX).toInt()
+                                  controlParams.y = initY + (e.rawY - touchY).toInt()
+                                  windowManager.updateViewLayout(rootControl, controlParams)
+                                  return true
+                              }
+                          }
+                          return false
+                      }
+                  })
+
+                  controlView = rootControl
+                  windowManager.addView(controlView, controlParams)
+              }
+
+              private fun startScreenCapture(resultCode: Int, data: Intent) {
+                  val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                  mediaProjection = mpManager.getMediaProjection(resultCode, data)
+                  rebuildCaptureResolution()
+              }
+
+              private fun rebuildCaptureResolution() {
+                  updateScreenMetrics()
+                  val factor = mosaicBlockSize.coerceAtLeast(4)
+                  val smallW = (screenWidth / factor).coerceAtLeast(16)
+                  val smallH = (screenHeight / factor).coerceAtLeast(16)
+
+                  val oldReader = imageReader
+                  val newReader = ImageReader.newInstance(smallW, smallH, PixelFormat.RGBA_8888, 2)
+
+                  newReader.setOnImageAvailableListener({ reader ->
+                      val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
+                      try {
+                          val now = SystemClock.elapsedRealtime()
+                          val minInterval = 1000L / targetFps.coerceIn(5, 60)
+                          if (now - lastFrameTimeMs < minInterval || mosaicView?.visibility != View.VISIBLE) {
+                              return@setOnImageAvailableListener
+                          }
+                          lastFrameTimeMs = now
+
+                          val plane = image.planes[0]
+                          val buffer = plane.buffer
+                          val pixelStride = plane.pixelStride
+                          val rowStride = plane.rowStride
+                          val rowPadding = rowStride - pixelStride * smallW
+
+                          val wWithPad = smallW + rowPadding / pixelStride
+                          val rawBitmap = Bitmap.createBitmap(wWithPad, smallH, Bitmap.Config.ARGB_8888)
+                          rawBitmap.copyPixelsFromBuffer(buffer)
+
+                          val finalBitmap = if (rowPadding == 0) {
+                              rawBitmap
+                          } else {
+                              val cropped = Bitmap.createBitmap(rawBitmap, 0, 0, smallW, smallH)
+                              rawBitmap.recycle()
+                              cropped
+                          }
+
+                          mainHandler.post {
+                              val old = currentBitmap
+                              currentBitmap = finalBitmap
+                              mosaicView?.invalidate()
+                              old?.recycle()
+                          }
+                      } catch (e: Exception) {
+                          e.printStackTrace()
+                      } finally {
+                          image.close()
+                      }
+                  }, bgHandler)
+
+                  imageReader = newReader
+
+                  if (virtualDisplay == null) {
+                      virtualDisplay = mediaProjection?.createVirtualDisplay(
+                          "FastHardwareMosaic",
+                          smallW,
+                          smallH,
+                          screenDensity,
+                          DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                          newReader.surface,
+                          null,
+                          bgHandler
+                      )
+                  } else {
+                      virtualDisplay?.resize(smallW, smallH, screenDensity)
+                      virtualDisplay?.surface = newReader.surface
+                  }
+
+                  oldReader?.close()
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  virtualDisplay?.release()
+                  imageReader?.close()
+                  mediaProjection?.stop()
+                  bgThread?.quitSafely()
+
+                  mosaicView?.let { windowManager.removeView(it) }
+                  controlView?.let { windowManager.removeView(it) }
+                  currentBitmap?.recycle()
+              }
+
+              inner class MosaicOverlayView(context: Context) : View(context) {
+                  private val paint = Paint().apply {
+                      isFilterBitmap = false
+                      isAntiAlias = false
+                  }
+                  private val destRect = Rect()
+
+                  override fun onDraw(canvas: Canvas) {
+                      super.onDraw(canvas)
+                      val bmp = currentBitmap
+                      if (bmp != null && !bmp.isRecycled) {
+                          destRect.set(0, 0, width, height)
+                          canvas.drawBitmap(bmp, null, destRect, paint)
+                      }
+                  }
+              }
+          }
+          EOF
+
+      - name: Build Debug APK
+        run: gradle assembleDebug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: GalaxyNote10-FullScreen-Mosaic-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
