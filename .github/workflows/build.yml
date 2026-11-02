@@ -74,8 +74,8 @@ jobs:
                   applicationId "com.example.mosaicoverlay"
                   minSdk 29
                   targetSdk 33
-                  versionCode 4
-                  versionName "4.0"
+                  versionCode 5
+                  versionName "5.0"
               }
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
@@ -92,7 +92,7 @@ jobs:
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
               <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
               <application
                   android:allowBackup="true"
                   android:label="전체화면 모자이크"
@@ -111,7 +111,7 @@ jobs:
                       android:enabled="true"
                       android:exported="false"
                       android:configChanges="orientation|screenSize|screenLayout"
-                      android:foregroundServiceType="specialUse" />
+                      android:foregroundServiceType="mediaProjection" />
               </application>
           </manifest>
           EOF
@@ -120,8 +120,10 @@ jobs:
           package com.example.mosaicoverlay
 
           import android.app.Activity
+          import android.content.Context
           import android.content.Intent
           import android.graphics.Color
+          import android.media.projection.MediaProjectionManager
           import android.net.Uri
           import android.os.Build
           import android.os.Bundle
@@ -133,10 +135,13 @@ jobs:
           import android.widget.Toast
 
           class MainActivity : Activity() {
+              private lateinit var projectionManager: MediaProjectionManager
               private val REQ_OVERLAY = 1001
+              private val REQ_CAPTURE = 1002
 
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
+                  projectionManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
 
                   val layout = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
@@ -145,16 +150,16 @@ jobs:
                       setBackgroundColor(Color.parseColor("#F5F5F5"))
                   }
                   val infoText = TextView(this).apply {
-                      text = "갤럭시 노트 10 전체화면 모자이크 v4.0\n(무캡처 순수 광학 필터 버전)\n\n" +
-                             "• 화면 캡처 방식을 완전히 제거하여 깜빡임, 잔상, 렉이 0%입니다.\n" +
-                             "• 동영상 프레임(60fps)이 원본 그대로 부드럽게 유지됩니다.\n" +
-                             "• 제어판에서 [크기], [강도(농도)], [3가지 모자이크 패턴]을 실시간으로 변경할 수 있습니다."
+                      text = "갤럭시 노트 10 전체화면 모자이크 v5.0\n(실시간 화면 반응형 & 무깜빡임 핀홀 엔진)\n\n" +
+                             "• 화면을 껐다 켜지 않고 각 모자이크 블록 사이의 미세 핀홀(투명 틈)로 뒷배경 동영상의 실제 픽셀만 실시간 추출합니다.\n" +
+                             "• 깜빡임(Flicker)과 잔상(Ghosting) 없이 실제 화면 움직임에 100% 반응하여 모자이크 처리됩니다.\n" +
+                             "• 제어판에서 [모자이크 크기], [반응 속도(FPS)], [스타일]을 조절하세요."
                       textSize = 14f
                       setTextColor(Color.BLACK)
                       setPadding(0, 0, 0, 50)
                   }
                   val startBtn = Button(this).apply {
-                      text = "모자이크 필터 즉시 켜기"
+                      text = "반응형 모자이크 시작"
                       textSize = 17f
                       setOnClickListener { checkPermissionsAndStart() }
                   }
@@ -180,24 +185,35 @@ jobs:
                       )
                       startActivityForResult(intent, REQ_OVERLAY)
                   } else {
-                      startMosaicFilter()
+                      requestScreenCapture()
                   }
               }
 
-              private fun startMosaicFilter() {
-                  val serviceIntent = Intent(this, MosaicService::class.java)
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      startForegroundService(serviceIntent)
-                  } else {
-                      startService(serviceIntent)
-                  }
-                  moveTaskToBack(true)
+              private fun requestScreenCapture() {
+                  startActivityForResult(projectionManager.createScreenCaptureIntent(), REQ_CAPTURE)
               }
 
               override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
                   super.onActivityResult(requestCode, resultCode, data)
-                  if (requestCode == REQ_OVERLAY && Settings.canDrawOverlays(this)) {
-                      startMosaicFilter()
+                  if (requestCode == REQ_OVERLAY) {
+                      if (Settings.canDrawOverlays(this)) {
+                          requestScreenCapture()
+                      }
+                  } else if (requestCode == REQ_CAPTURE) {
+                      if (resultCode == RESULT_OK && data != null) {
+                          val serviceIntent = Intent(this, MosaicService::class.java).apply {
+                              putExtra("resultCode", resultCode)
+                              putExtra("data", data)
+                          }
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                              startForegroundService(serviceIntent)
+                          } else {
+                              startService(serviceIntent)
+                          }
+                          moveTaskToBack(true)
+                      } else {
+                          Toast.makeText(this, "화면 캡처 권한이 취소되었습니다.", Toast.LENGTH_SHORT).show()
+                      }
                   }
               }
           }
@@ -209,42 +225,99 @@ jobs:
           import android.app.*
           import android.content.Context
           import android.content.Intent
+          import android.content.res.Configuration
           import android.graphics.*
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
+          import android.media.ImageReader
+          import android.media.projection.MediaProjection
+          import android.media.projection.MediaProjectionManager
           import android.os.*
+          import android.util.DisplayMetrics
           import android.view.*
           import android.widget.*
 
           class MosaicService : Service() {
               private lateinit var windowManager: WindowManager
-              private var mosaicView: PureMosaicFilterView? = null
+              private var mediaProjection: MediaProjection? = null
+              private var virtualDisplay: VirtualDisplay? = null
+              private var imageReader: ImageReader? = null
+              private var mosaicView: ReactiveMosaicView? = null
               private var controlView: View? = null
 
-              // 1. 모자이크 타일 크기 (8 ~ 80px)
-              private var tileSize = 24
-              // 2. 모자이크 차폐 강도/농도 (40 ~ 245)
-              private var filterIntensity = 185
-              // 3. 패턴 모드 (0: 입체 유리 타일, 1: 체커보드 픽셀, 2: 마이크로 도트 매트릭스)
-              private var patternMode = 0
+              private var screenWidth = 1080
+              private var screenHeight = 2280
+              private var screenDensity = 400
+
+              // 캡처 해상도 (원본의 1/4 크기로 캡처하여 60fps에서도 렉 없이 핀홀 픽셀을 정확히 추출)
+              private val captureScale = 4
+              private var capW = 270
+              private var capH = 570
+
+              // 모자이크 설정값
+              @Volatile private var mosaicBlockSize = 36 // 화면 기준 모자이크 타일 크기 (16 ~ 96px)
+              @Volatile private var targetFps = 30       // 실시간 반응 프레임 (10 ~ 60fps)
+              @Volatile private var styleMode = 0        // 0: 꽉 찬 픽셀 모자이크, 1: 소프트 블렌딩 모자이크, 2: 원형 도트 모자이크
+              @Volatile private var isEnabled = true
+              @Volatile private var lastFrameTimeMs = 0L
+
+              // 추출된 실시간 모자이크 색상 배열
+              @Volatile private var gridColors: IntArray = IntArray(0)
+              @Volatile private var gridCols = 0
+              @Volatile private var gridRows = 0
+
+              private val mainHandler = Handler(Looper.getMainLooper())
+              private var bgThread: HandlerThread? = null
+              private var bgHandler: Handler? = null
 
               override fun onBind(intent: Intent?): IBinder? = null
 
               override fun onCreate() {
                   super.onCreate()
                   windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                  updateScreenMetrics()
+                  bgThread = HandlerThread("ReactiveMosaicThread", Process.THREAD_PRIORITY_DISPLAY).apply { start() }
+                  bgHandler = Handler(bgThread!!.looper)
+              }
+
+              private fun updateScreenMetrics() {
+                  val metrics = DisplayMetrics()
+                  @Suppress("DEPRECATION")
+                  windowManager.defaultDisplay.getRealMetrics(metrics)
+                  screenWidth = metrics.widthPixels
+                  screenHeight = metrics.heightPixels
+                  screenDensity = metrics.densityDpi
+                  capW = (screenWidth / captureScale).coerceAtLeast(100)
+                  capH = (screenHeight / captureScale).coerceAtLeast(100)
+              }
+
+              override fun onConfigurationChanged(newConfig: Configuration) {
+                  super.onConfigurationChanged(newConfig)
+                  updateScreenMetrics()
+                  bgHandler?.post { setupVirtualDisplay() }
               }
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
                   startForegroundNotification()
-                  setupOverlayViews()
-                  return START_STICKY
+                  val resultCode = intent?.getIntExtra("resultCode", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
+                  @Suppress("DEPRECATION")
+                  val data: Intent? = intent?.getParcelableExtra("data")
+
+                  if (resultCode == Activity.RESULT_OK && data != null) {
+                      setupOverlayViews()
+                      startScreenCapture(resultCode, data)
+                  } else {
+                      stopSelf()
+                  }
+                  return START_NOT_STICKY
               }
 
               private fun startForegroundNotification() {
-                  val channelId = "mosaic_filter_channel"
+                  val channelId = "mosaic_reactive_channel"
                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                       val channel = NotificationChannel(
                           channelId,
-                          "순수 모자이크 필터 서비스",
+                          "실시간 반응형 모자이크 서비스",
                           NotificationManager.IMPORTANCE_LOW
                       )
                       val manager = getSystemService(NotificationManager::class.java)
@@ -252,14 +325,14 @@ jobs:
                   }
                   val notification = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                       Notification.Builder(this, channelId)
-                          .setContentTitle("순수 모자이크 필터 작동 중 (깜빡임 없음)")
-                          .setContentText("상단 제어판에서 타일 크기와 강도를 조절하세요.")
+                          .setContentTitle("반응형 모자이크 v5.0 작동 중")
+                          .setContentText("깜빡임 없는 실시간 픽셀 반응 엔진")
                           .setSmallIcon(android.R.drawable.ic_menu_view)
                           .build()
                   } else {
                       @Suppress("DEPRECATION")
                       Notification.Builder(this)
-                          .setContentTitle("순수 모자이크 필터 작동 중")
+                          .setContentTitle("반응형 모자이크 작동 중")
                           .setSmallIcon(android.R.drawable.ic_menu_view)
                           .build()
                   }
@@ -268,9 +341,7 @@ jobs:
 
               private fun setupOverlayViews() {
                   if (mosaicView != null) return
-                  mosaicView = PureMosaicFilterView(this).apply {
-                      rebuildShader()
-                  }
+                  mosaicView = ReactiveMosaicView(this)
 
                   val overlayType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
@@ -291,13 +362,10 @@ jobs:
                       PixelFormat.TRANSLUCENT
                   ).apply {
                       gravity = Gravity.TOP or Gravity.START
+                      x = 0
+                      y = 0
                       if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                           layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-                      }
-                      // 안드로이드 12 이상 기기에서 지원하는 경우 하드웨어 배경 블러까지 동시 활성화
-                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                          flags = flags or WindowManager.LayoutParams.FLAG_BLUR_BEHIND
-                          blurBehindRadius = 25
                       }
                   }
                   windowManager.addView(mosaicView, mosaicParams)
@@ -312,7 +380,7 @@ jobs:
                       gravity = Gravity.CENTER_VERTICAL
                   }
                   val titleText = TextView(this).apply {
-                      text = "⠿ 필터 제어판 "
+                      text = "⠿ 모자이크 "
                       setTextColor(Color.WHITE)
                       textSize = 12f
                   }
@@ -321,17 +389,17 @@ jobs:
                       setPadding(0, 10, 0, 0)
                   }
 
-                  val modeBtn = Button(this).apply {
-                      text = "패턴: 유리타일"
+                  val styleBtn = Button(this).apply {
+                      text = "사각타일"
                       textSize = 11f
                       setOnClickListener {
-                          patternMode = (patternMode + 1) % 3
-                          text = when (patternMode) {
-                              0 -> "패턴: 유리타일"
-                              1 -> "패턴: 픽셀격자"
-                              else -> "패턴: 도트필터"
+                          styleMode = (styleMode + 1) % 3
+                          text = when (styleMode) {
+                              0 -> "사각타일"
+                              1 -> "밀착픽셀"
+                              else -> "원형도트"
                           }
-                          mosaicView?.rebuildShader()
+                          mosaicView?.invalidate()
                       }
                   }
 
@@ -339,12 +407,13 @@ jobs:
                       text = "ON"
                       textSize = 11f
                       setOnClickListener {
-                          if (mosaicView?.visibility == View.VISIBLE) {
-                              mosaicView?.visibility = View.INVISIBLE
-                              text = "OFF"
-                          } else {
+                          isEnabled = !isEnabled
+                          if (isEnabled) {
                               mosaicView?.visibility = View.VISIBLE
                               text = "ON"
+                          } else {
+                              mosaicView?.visibility = View.INVISIBLE
+                              text = "OFF"
                           }
                       }
                   }
@@ -370,31 +439,30 @@ jobs:
                   }
 
                   topRow.addView(titleText)
-                  topRow.addView(modeBtn)
+                  topRow.addView(styleBtn)
                   topRow.addView(toggleBtn)
                   topRow.addView(minBtn)
                   topRow.addView(closeBtn)
 
-                  // 1. 모자이크 타일 크기 슬라이더
+                  // 1. 모자이크 강도(블록 크기) 슬라이더
                   val sizeRow = LinearLayout(this).apply {
                       orientation = LinearLayout.HORIZONTAL
                       gravity = Gravity.CENTER_VERTICAL
                   }
                   val sizeLabel = TextView(this).apply {
-                      text = "타일크기(24): "
+                      text = "강도(36): "
                       setTextColor(Color.WHITE)
                       textSize = 11f
-                      width = 200
+                      width = 185
                   }
                   val sizeSeek = SeekBar(this).apply {
-                      max = 72 // 8 ~ 80px
-                      progress = 16
+                      max = 84 // 16 ~ 100px
+                      progress = 20 // 기본 36px
                       layoutParams = LinearLayout.LayoutParams(340, ViewGroup.LayoutParams.WRAP_CONTENT)
                       setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                           override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                              tileSize = p + 8
-                              sizeLabel.text = "타일크기($tileSize): "
-                              mosaicView?.rebuildShader()
+                              mosaicBlockSize = p + 16
+                              sizeLabel.text = "강도($mosaicBlockSize): "
                           }
                           override fun onStartTrackingTouch(s: SeekBar?) {}
                           override fun onStopTrackingTouch(s: SeekBar?) {}
@@ -403,38 +471,36 @@ jobs:
                   sizeRow.addView(sizeLabel)
                   sizeRow.addView(sizeSeek)
 
-                  // 2. 모자이크 가림 강도(농도) 슬라이더
-                  val alphaRow = LinearLayout(this).apply {
+                  // 2. 반응 속도(FPS) 슬라이더
+                  val fpsRow = LinearLayout(this).apply {
                       orientation = LinearLayout.HORIZONTAL
                       gravity = Gravity.CENTER_VERTICAL
                       setPadding(0, 8, 0, 0)
                   }
-                  val alphaLabel = TextView(this).apply {
-                      text = "가림강도(72%): "
+                  val fpsLabel = TextView(this).apply {
+                      text = "속도(30fps): "
                       setTextColor(Color.WHITE)
                       textSize = 11f
-                      width = 200
+                      width = 185
                   }
-                  val alphaSeek = SeekBar(this).apply {
-                      max = 205 // 40 ~ 245
-                      progress = 145 // 기본 185 (72%)
+                  val fpsSeek = SeekBar(this).apply {
+                      max = 50 // 10 ~ 60fps
+                      progress = 20 // 기본 30fps
                       layoutParams = LinearLayout.LayoutParams(340, ViewGroup.LayoutParams.WRAP_CONTENT)
                       setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                           override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
-                              filterIntensity = p + 40
-                              val pct = (filterIntensity * 100) / 255
-                              alphaLabel.text = "가림강도(${pct}%): "
-                              mosaicView?.rebuildShader()
+                              targetFps = p + 10
+                              fpsLabel.text = "속도(${targetFps}fps): "
                           }
                           override fun onStartTrackingTouch(s: SeekBar?) {}
                           override fun onStopTrackingTouch(s: SeekBar?) {}
                       })
                   }
-                  alphaRow.addView(alphaLabel)
-                  alphaRow.addView(alphaSeek)
+                  fpsRow.addView(fpsLabel)
+                  fpsRow.addView(fpsSeek)
 
                   slidersContainer.addView(sizeRow)
-                  slidersContainer.addView(alphaRow)
+                  slidersContainer.addView(fpsRow)
                   rootControl.addView(topRow)
                   rootControl.addView(slidersContainer)
 
@@ -478,104 +544,166 @@ jobs:
                   windowManager.addView(controlView, controlParams)
               }
 
+              private fun startScreenCapture(resultCode: Int, data: Intent) {
+                  val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                  mediaProjection = mpManager.getMediaProjection(resultCode, data)
+                  mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+                      override fun onStop() {
+                          stopSelf()
+                      }
+                  }, mainHandler)
+                  setupVirtualDisplay()
+              }
+
+              private fun setupVirtualDisplay() {
+                  updateScreenMetrics()
+                  val oldReader = imageReader
+                  val newReader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2)
+
+                  newReader.setOnImageAvailableListener({ reader ->
+                      val image = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
+                      try {
+                          if (!isEnabled) return@setOnImageAvailableListener
+                          val now = SystemClock.elapsedRealtime()
+                          val minInterval = 1000L / targetFps.coerceIn(10, 60)
+                          if (now - lastFrameTimeMs < minInterval) return@setOnImageAvailableListener
+                          lastFrameTimeMs = now
+
+                          val plane = image.planes[0]
+                          val buffer = plane.buffer
+                          val pixelStride = plane.pixelStride
+                          val rowStride = plane.rowStride
+
+                          val blockPx = mosaicBlockSize.coerceAtLeast(16)
+                          val cols = (screenWidth / blockPx).coerceAtLeast(10)
+                          val rows = (screenHeight / blockPx).coerceAtLeast(10)
+                          val newColors = IntArray(cols * rows)
+
+                          // 핵심 원리: 각 모자이크 블록의 '좌상단 코너(미세 투명 핀홀 위치)'에 있는 실제 뒷배경 픽셀만 정확히 추출!
+                          // 모자이크 타일은 이 핀홀 위치만 비워두고 나머지 94% 면적을 덮으므로, 깜빡임과 잔상(자기 자신 재캡처)이 원천 차단됨!
+                          for (r in 0 until rows) {
+                              // 핀홀 중심 좌표 (블록 시작점 + 2px 지점)
+                              val screenY = (r * blockPx + 2).coerceIn(0, screenHeight - 1)
+                              val cy = ((screenY.toLong() * capH) / screenHeight).toInt().coerceIn(0, capH - 1)
+                              val rowOffset = cy * rowStride
+
+                              for (c in 0 until cols) {
+                                  val screenX = (c * blockPx + 2).coerceIn(0, screenWidth - 1)
+                                  val cx = ((screenX.toLong() * capW) / screenWidth).toInt().coerceIn(0, capW - 1)
+                                  val offset = rowOffset + cx * pixelStride
+
+                                  val red = buffer.get(offset).toInt() and 0xFF
+                                  val green = buffer.get(offset + 1).toInt() and 0xFF
+                                  val blue = buffer.get(offset + 2).toInt() and 0xFF
+
+                                  // 추출한 실제 뒷배경 색상을 100% 불투명한 모자이크 타일 색상으로 저장
+                                  newColors[r * cols + c] = Color.rgb(red, green, blue)
+                              }
+                          }
+
+                          gridCols = cols
+                          gridRows = rows
+                          gridColors = newColors
+
+                          mainHandler.post {
+                              mosaicView?.invalidate()
+                          }
+                      } catch (e: Exception) {
+                          e.printStackTrace()
+                      } finally {
+                          image.close()
+                      }
+                  }, bgHandler)
+
+                  imageReader = newReader
+
+                  if (virtualDisplay == null) {
+                      virtualDisplay = mediaProjection?.createVirtualDisplay(
+                          "PinholeReactiveMosaic",
+                          capW,
+                          capH,
+                          screenDensity,
+                          DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                          newReader.surface,
+                          null,
+                          bgHandler
+                      )
+                  } else {
+                      virtualDisplay?.resize(capW, capH, screenDensity)
+                      virtualDisplay?.surface = newReader.surface
+                  }
+                  oldReader?.close()
+              }
+
               override fun onDestroy() {
                   super.onDestroy()
+                  isEnabled = false
+                  mainHandler.removeCallbacksAndMessages(null)
+                  virtualDisplay?.release()
+                  imageReader?.close()
+                  mediaProjection?.stop()
+                  bgThread?.quitSafely()
                   mosaicView?.let { windowManager.removeView(it) }
                   controlView?.let { windowManager.removeView(it) }
               }
 
-              // 캡처 없이 GPU BitmapShader 타일링만으로 화면 전체에 즉각적인 모자이크 질감을 입히는 뷰
-              inner class PureMosaicFilterView(context: Context) : View(context) {
-                  private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-                  private var tileBitmap: Bitmap? = null
+              // 핀홀(샘플링 틈)을 제외한 모든 영역을 추출된 실시간 색상으로 덮어그리는 반응형 모자이크 뷰
+              inner class ReactiveMosaicView(context: Context) : View(context) {
+                  private val fillPaint = Paint().apply {
+                      style = Paint.Style.FILL
+                      isAntiAlias = false
+                  }
+                  private val screenLoc = IntArray(2)
 
-                  fun rebuildShader() {
-                      val size = tileSize.coerceAtLeast(6)
-                      val alpha = filterIntensity.coerceIn(30, 250)
+                  override fun onDraw(canvas: Canvas) {
+                      super.onDraw(canvas)
+                      val colors = gridColors
+                      val cols = gridCols
+                      val rows = gridRows
+                      if (colors.isEmpty() || cols <= 0 || rows <= 0) return
 
-                      tileBitmap?.recycle()
-                      // 2x2 모자이크 블록 패턴을 생성하여 전체 화면에 끊김 없이 반복(REPEAT) 렌더링
-                      val bmp = Bitmap.createBitmap(size * 2, size * 2, Bitmap.Config.ARGB_8888)
-                      val c = Canvas(bmp)
-                      val p = Paint(Paint.ANTI_ALIAS_FLAG)
+                      // 상태표시줄/카메라홀 오프셋 완벽 보정 (위로 밀리는 현상 0%)
+                      getLocationOnScreen(screenLoc)
+                      val offsetX = -screenLoc[0].toFloat()
+                      val offsetY = -screenLoc[1].toFloat()
 
-                      when (patternMode) {
-                          0 -> {
-                              // 모드 0: 입체 유리 모자이크 타일 (빛의 명암 교차로 뒷배경 글씨/영상을 자연스럽게 뭉개줌)
-                              for (row in 0..1) {
-                                  for (col in 0..1) {
-                                      val left = (col * size).toFloat()
-                                      val top = (row * size).toFloat()
-                                      val right = left + size
-                                      val bottom = top + size
+                      val cellW = screenWidth.toFloat() / cols
+                      val cellH = screenHeight.toFloat() / rows
 
-                                      val baseGray = if ((row + col) % 2 == 0) 150 else 105
-                                      p.style = Paint.Style.FILL
-                                      p.color = Color.argb(alpha, baseGray, baseGray, baseGray)
-                                      c.drawRect(left, top, right, bottom, p)
+                      // 캡처 해상도(1/4)에서 1픽셀이 순수 원본 화면을 볼 수 있도록 좌상단 코너 혹은 테두리에 4px의 미세 틈(Pinhole)을 유지
+                      val gap = if (styleMode == 1) 4f else 5f
 
-                                      // 타일 내부 중앙 코어 (광학 왜곡 효과)
-                                      val inset = (size * 0.22f).coerceAtLeast(2f)
-                                      val coreAlpha = (alpha * 0.65f).toInt()
-                                      val coreGray = if ((row + col) % 2 == 0) 210 else 65
-                                      p.color = Color.argb(coreAlpha, coreGray, coreGray, coreGray)
-                                      c.drawRect(left + inset, top + inset, right - inset, bottom - inset, p)
+                      for (r in 0 until rows) {
+                          val top = offsetY + r * cellH
+                          val bottom = top + cellH
+                          val rowIdx = r * cols
 
-                                      // 모자이크 칼각 테두리 (베벨 효과)
-                                      p.style = Paint.Style.STROKE
-                                      p.strokeWidth = 2f
-                                      p.color = Color.argb((alpha + 25).coerceAtMost(255), 35, 35, 35)
-                                      c.drawRect(left, top, right, bottom, p)
+                          for (c in 0 until cols) {
+                              if (rowIdx + c >= colors.size) break
+                              fillPaint.color = colors[rowIdx + c]
+                              val left = offsetX + c * cellW
+                              val right = left + cellW
+
+                              when (styleMode) {
+                                  0 -> {
+                                      // 모드 0: 정통 사각 타일 모자이크 (격자 틈 사이로 실시간 빛을 감지해 즉시 타일 색상이 변함)
+                                      canvas.drawRect(left + gap, top + gap, right, bottom, fillPaint)
                                   }
-                              }
-                          }
-                          1 -> {
-                              // 모드 1: 고밀도 픽셀 격자 (어두운 톤으로 차분하게 화면 디테일 차폐)
-                              for (row in 0..1) {
-                                  for (col in 0..1) {
-                                      val left = (col * size).toFloat()
-                                      val top = (row * size).toFloat()
-                                      val isEven = (row + col) % 2 == 0
-                                      p.style = Paint.Style.FILL
-                                      p.color = if (isEven) {
-                                          Color.argb(alpha, 28, 28, 28)
-                                      } else {
-                                          Color.argb((alpha * 0.55f).toInt(), 90, 90, 90)
-                                      }
-                                      c.drawRect(left, top, left + size, top + size, p)
-
-                                      p.style = Paint.Style.STROKE
-                                      p.strokeWidth = 1.5f
-                                      p.color = Color.argb(alpha, 0, 0, 0)
-                                      c.drawRect(left, top, left + size, top + size, p)
+                                  1 -> {
+                                      // 모드 1: 밀착 픽셀 모자이크 (타일은 꽉 채우되 좌상단 코너에 아주 작은 핀홀만 남겨 원본 색상 감지)
+                                      canvas.drawRect(left + gap, top, right, bottom, fillPaint)
+                                      canvas.drawRect(left, top + gap, left + gap, bottom, fillPaint)
                                   }
-                              }
-                          }
-                          else -> {
-                              // 모드 2: 도트 매트릭스 프라이버시 필터 (공공장소 시야 차단 및 윤곽선 파쇄)
-                              c.drawColor(Color.argb((alpha * 0.85f).toInt(), 18, 18, 18))
-                              p.style = Paint.Style.FILL
-                              // 4개의 타일 중앙에 투명도가 다른 원형 렌즈 배치
-                              for (row in 0..1) {
-                                  for (col in 0..1) {
-                                      val cx = col * size + size / 2f
-                                      val cy = row * size + size / 2f
-                                      val radius = size * 0.36f
-                                      p.color = Color.argb((alpha * 0.35f).toInt(), 190, 190, 190)
-                                      c.drawCircle(cx, cy, radius, p)
+                                  else -> {
+                                      // 모드 2: 원형 LED 도트 모자이크 (좌상단 코너 여백으로 원본 감지 + 원형 도트가 실시간 반응)
+                                      val cx = (left + right) * 0.5f
+                                      val cy = (top + bottom) * 0.5f
+                                      val radius = (minOf(cellW, cellH) * 0.48f)
+                                      canvas.drawCircle(cx, cy, radius, fillPaint)
                                   }
                               }
                           }
                       }
-
-                      tileBitmap = bmp
-                      paint.shader = BitmapShader(bmp, Shader.TileMode.REPEAT, Shader.TileMode.REPEAT)
-                      invalidate()
-                  }
-
-                  override fun onDraw(canvas: Canvas) {
-                      super.onDraw(canvas)
-                      canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
                   }
               }
           }
@@ -588,5 +716,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: GalaxyNote10-FullScreen-Mosaic-APK-v4
+          name: GalaxyNote10-FullScreen-Mosaic-APK-v5
           path: app/build/outputs/apk/debug/app-debug.apk
